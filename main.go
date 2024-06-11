@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"github.com/faiface/beep/mp3"
 	"github.com/hajimehoshi/oto"
@@ -9,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 )
 
 func main() {
@@ -53,7 +55,6 @@ func speaker(txt string) {
 		return
 	}
 	defer streamer.Close()
-
 	// Initialize oto player
 	ctx, err := oto.NewContext(int(format.SampleRate), format.NumChannels, 2, 4096)
 	if err != nil {
@@ -65,10 +66,22 @@ func speaker(txt string) {
 	player := ctx.NewPlayer()
 	defer player.Close()
 
+	// Create output file
+	outputFile, err := os.Create("output.wav")
+	if err != nil {
+		fmt.Println("Error creating output file:", err)
+		return
+	}
+	defer outputFile.Close()
+
+	// Write WAV header
+	writeWavHeader(outputFile, int(format.SampleRate), format.NumChannels)
+
 	// Play the stream
 	eg := errgroup.Group{}
 	eg.Go(func() error {
 		buffer := make([][2]float64, 4096)
+		totalBytes := 0
 		for {
 			n, ok := streamer.Stream(buffer)
 			if !ok {
@@ -79,21 +92,69 @@ func speaker(txt string) {
 				sample := buffer[i]
 				left := int16(sample[0] * 32767)
 				right := int16(sample[1] * 32767)
-				data[i*4] = byte(left)
-				data[i*4+1] = byte(left >> 8)
-				data[i*4+2] = byte(right)
-				data[i*4+3] = byte(right >> 8)
+				binary.LittleEndian.PutUint16(data[i*4:], uint16(left))
+				binary.LittleEndian.PutUint16(data[i*4+2:], uint16(right))
 			}
 			_, err := player.Write(data)
 			if err != nil {
 				return err
 			}
+			_, err = outputFile.Write(data)
+			if err != nil {
+				return err
+			}
+			totalBytes += len(data)
 		}
-		return nil
+		// Update WAV header with correct file sizes
+		return updateWavHeader(outputFile, totalBytes)
 	})
 	if err := eg.Wait(); err != nil {
 		fmt.Println("Playback error:", err)
 	} else {
 		fmt.Println("Audio playback finished")
 	}
+}
+
+func writeWavHeader(w io.Writer, sampleRate int, numChannels int) {
+	bitsPerSample := 16
+	writeString(w, "RIFF")
+	writeUint32(w, 0) // Placeholder for file size
+	writeString(w, "WAVE")
+	writeString(w, "fmt ")
+	writeUint32(w, 16) // fmt chunk size
+	writeUint16(w, 1)  // audio format (1 = PCM)
+	writeUint16(w, uint16(numChannels))
+	writeUint32(w, uint32(sampleRate))
+	writeUint32(w, uint32(sampleRate*numChannels*bitsPerSample/8)) // byte rate
+	writeUint16(w, uint16(numChannels*bitsPerSample/8))            // block align
+	writeUint16(w, uint16(bitsPerSample))
+	writeString(w, "data")
+	writeUint32(w, 0) // Placeholder for data chunk size
+}
+
+func updateWavHeader(w io.WriteSeeker, totalBytes int) error {
+	fileSize := 36 + totalBytes
+	_, err := w.Seek(4, 0)
+	if err != nil {
+		return err
+	}
+	writeUint32(w, uint32(fileSize))
+	_, err = w.Seek(40, 0)
+	if err != nil {
+		return err
+	}
+	writeUint32(w, uint32(totalBytes))
+	return nil
+}
+
+func writeString(w io.Writer, s string) {
+	_, _ = w.Write([]byte(s))
+}
+
+func writeUint32(w io.Writer, v uint32) {
+	_ = binary.Write(w, binary.LittleEndian, v)
+}
+
+func writeUint16(w io.Writer, v uint16) {
+	_ = binary.Write(w, binary.LittleEndian, v)
 }
