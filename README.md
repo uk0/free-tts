@@ -12,4 +12,4 @@ go run .
 
 ```
 
-[output.wav](output.wav)
+[output.mov](https://github.com/uk0/free-tts/demo/output.mov)
